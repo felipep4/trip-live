@@ -31,6 +31,7 @@ h1{font-size:18px;font-weight:700;letter-spacing:-.01em}
 .refresh-btn:disabled{background:var(--muted);border-color:var(--muted);cursor:wait}
 .status{font-size:11.5px;color:var(--muted);margin-top:5px}
 .status .fresh{color:var(--green);font-weight:600}
+.legend .lg{cursor:pointer;user-select:none}.legend .lg.off{opacity:.35;text-decoration:line-through}
 .warn{color:#B45309}
 #_newver{display:none;margin-top:6px;padding:7px 10px;border-radius:8px;background:#FEF3C7;color:#92400E;font-size:12px;font-weight:600;cursor:pointer;border:1px solid #F59E0B}
 .sticky{position:sticky;top:0;z-index:50;background:var(--bg);padding:6px 0 4px;border-bottom:1px solid var(--border);margin-bottom:10px}
@@ -514,28 +515,41 @@ function renderApnl(){
 // ─── Evolução da Cota (SVG, sem biblioteca) ──────────────────────────────
 function _valAtOrBefore(dates,values,d){let i=-1;for(let j=0;j<dates.length;j++){if(dates[j]<=d)i=j;else break;}return i>=0?[dates[i],values[i]]:null;}
 function _cut(dates,values,start){const out=[],od=[];for(let j=0;j<dates.length;j++)if(dates[j]>=start){od.push(dates[j]);out.push(values[j]);}return [od,out];}
+// Componentes no gráfico (05/10/2026, pedido do Felipe: 'B1 e B2+3 igual temos no PORTFOLIO').
+// Para um agregado, entram os books do Live que o compõem — sub-agregado cobre seus membros
+// (TRIP Total → B1 + B2+3; B2+3 → B2 + B3). Mesma base 100 na data inicial da janela.
+const COMP_COLORS={B1:'#eb6834',B23:'#4a3aa7',B2:'#e87ba4',B3:'#eda100',B4:'#008300'};
+const chartHide=new Set();function toggleLine(n){if(chartHide.has(n))chartHide.delete(n);else chartHide.add(n);renderChart();}
+function _chartComps(b){const agg=b.agg_of||[];if(!agg.length)return [];const byKey={};for(const x of DATA.books)byKey[x.engine_key]=x;
+  const out=[],used=new Set();
+  for(const x of DATA.books){if(x.engine_key===b.engine_key||!x.agg_of||!x.agg_of.length)continue;if(x.agg_of.every(k=>agg.includes(k))){out.push(x);x.agg_of.forEach(k=>used.add(k));}}
+  for(const k of agg){if(used.has(k))continue;if(byKey[k])out.push(byKey[k]);}
+  return out.sort((x,y)=>DATA.books.indexOf(x)-DATA.books.indexOf(y));}
 function renderChart(){
   const b=getBook();const el=document.getElementById('_chart'),lg=document.getElementById('_chart-legend');
   const s=b.series||{};if(!s.dates||s.dates.length<2){el.innerHTML='';lg.innerHTML='';return;}
   const bd=boundsFor(b,activePeriod);let start=(bd&&bd.start)||s.dates[0];if(start<s.dates[0])start=s.dates[0];
   const base=_valAtOrBefore(s.dates,s.values,start)||[s.dates[0],s.values[0]];
   const lines=[];
-  const [d0,v0]=_cut(s.dates,s.values,base[0]);lines.push({name:b.label,color:'#1D4ED8',dates:d0,vals:v0.map(x=>x/base[1]*100),w:2.2});
+  const [d0,v0]=_cut(s.dates,s.values,base[0]);lines.push({name:b.label,color:'#1D4ED8',dates:d0,vals:v0.map(x=>x/base[1]*100),w:2.4});
+  for(const c0 of _chartComps(b)){const c=liveBook(c0);const s2=c.series||{};if(!s2.dates||!s2.dates.length)continue;const bb=_valAtOrBefore(s2.dates,s2.values,base[0]);if(!bb)continue;
+    const [dd,vv]=_cut(s2.dates,s2.values,bb[0]);lines.push({name:c.label,color:COMP_COLORS[c.key]||'#64748B',dates:dd,vals:vv.map(x=>x/bb[1]*100),w:1.6});}
   const BMC={CDI:'#B45309',IBOV:'#059669'};
   for(const bk of ['CDI','IBOV']){const bm=(getBench()||{})[bk];if(!bm||!bm.dates)continue;const bb=_valAtOrBefore(bm.dates,bm.values,base[0]);if(!bb)continue;
     const [dd,vv]=_cut(bm.dates,bm.values,bb[0]);const last=d0[d0.length-1];const d2=[],v2=[];for(let j=0;j<dd.length;j++)if(dd[j]<=last){d2.push(dd[j]);v2.push(vv[j]/bb[1]*100);}
     lines.push({name:bk==='IBOV'?'IBOVESPA':bk,color:BMC[bk],dates:d2,vals:v2,w:1.4});}
   const W=720,H=230,L=38,R=8,T=10,B=22;
-  const allD=lines.flatMap(l=>l.dates);const dmin=allD.reduce((a,x)=>x<a?x:a),dmax=allD.reduce((a,x)=>x>a?x:a);
+  const vis=lines.filter(l=>!chartHide.has(l.name));if(!vis.length){chartHide.clear();return renderChart();}
+  const allD=vis.flatMap(l=>l.dates);const dmin=allD.reduce((a,x)=>x<a?x:a),dmax=allD.reduce((a,x)=>x>a?x:a);
   const tx=d=>{const a=new Date(dmin),z=new Date(dmax),c=new Date(d);return L+(z-a? (c-a)/(z-a):0)*(W-L-R);};
-  const allV=lines.flatMap(l=>l.vals);let vmin=Math.min(...allV),vmax=Math.max(...allV);if(vmax-vmin<1){vmin-=1;vmax+=1;}const pad=(vmax-vmin)*.06;vmin-=pad;vmax+=pad;
+  const allV=vis.flatMap(l=>l.vals);let vmin=Math.min(...allV),vmax=Math.max(...allV);if(vmax-vmin<1){vmin-=1;vmax+=1;}const pad=(vmax-vmin)*.06;vmin-=pad;vmax+=pad;
   const ty=v=>T+(1-(v-vmin)/(vmax-vmin))*(H-T-B);
   let g='';const nt=4;for(let i=0;i<=nt;i++){const v=vmin+(vmax-vmin)*i/nt,y=ty(v);g+=`<line x1="${L}" x2="${W-R}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="#D5DCE5" stroke-width="1"/><text x="${L-4}" y="${(y+4).toFixed(1)}" font-size="11" fill="#5A6B80" text-anchor="end">${v.toFixed(0)}</text>`;}
   const y100=ty(100);if(y100>T&&y100<H-B)g+=`<line x1="${L}" x2="${W-R}" y1="${y100.toFixed(1)}" y2="${y100.toFixed(1)}" stroke="#5A6B80" stroke-dasharray="3 3" stroke-width="1"/>`;
   g+=`<text x="${L}" y="${H-6}" font-size="11" fill="#5A6B80">${fmtD(dmin)}</text><text x="${W-R}" y="${H-6}" font-size="11" fill="#5A6B80" text-anchor="end">${fmtD(dmax)}</text>`;
-  for(const l of lines){let p='';for(let j=0;j<l.dates.length;j++)p+=(j?'L':'M')+tx(l.dates[j]).toFixed(1)+' '+ty(l.vals[j]).toFixed(1);g+=`<path d="${p}" fill="none" stroke="${l.color}" stroke-width="${l.w}" stroke-linejoin="round"/>`;}
+  for(const l of vis){let p='';for(let j=0;j<l.dates.length;j++)p+=(j?'L':'M')+tx(l.dates[j]).toFixed(1)+' '+ty(l.vals[j]).toFixed(1);g+=`<path d="${p}" fill="none" stroke="${l.color}" stroke-width="${l.w}" stroke-linejoin="round"/>`;}
   el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;font-family:inherit">${g}</svg>`;
-  lg.innerHTML=lines.map(l=>{const r=l.vals[l.vals.length-1]/100-1;return `<span><i style="background:${l.color}"></i>${l.name} <b class="${pctCls(r)}">${fmtPct(r)}</b></span>`;}).join('')+`<span class="muted">desde ${fmtD(base[0])}</span>`;
+  lg.innerHTML=lines.map(l=>{const r=l.vals[l.vals.length-1]/100-1;return `<span class="lg${chartHide.has(l.name)?' off':''}" onclick="toggleLine('${l.name.replace(/'/g,'')}')"><i style="background:${l.color}"></i>${l.name} <b class="${pctCls(r)}">${fmtPct(r)}</b></span>`;}).join('')+`<span class="muted">desde ${fmtD(base[0])} · toque na legenda para esconder/mostrar</span>`;
 }
 
 // ─── Retornos por Período ────────────────────────────────────────────────
