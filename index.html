@@ -31,6 +31,8 @@ h1{font-size:18px;font-weight:700;letter-spacing:-.01em}
 .refresh-btn:disabled{background:var(--muted);border-color:var(--muted);cursor:wait}
 .status{font-size:11.5px;color:var(--muted);margin-top:5px}
 .status .fresh{color:var(--green);font-weight:600}
+.warn{color:#B45309}
+#_newver{display:none;margin-top:6px;padding:7px 10px;border-radius:8px;background:#FEF3C7;color:#92400E;font-size:12px;font-weight:600;cursor:pointer;border:1px solid #F59E0B}
 .sticky{position:sticky;top:0;z-index:50;background:var(--bg);padding:6px 0 4px;border-bottom:1px solid var(--border);margin-bottom:10px}
 
 /* Card do book (mesmo desenho do PORTFOLIO) */
@@ -139,6 +141,7 @@ footer{margin-top:16px;color:var(--muted);font-size:10.5px;text-align:center;lin
     <button class="refresh-btn" id="_refresh" onclick="refreshLive()">⟳ Atualizar</button>
   </div>
   <div id="_status" class="status">Preços de fechamento · toque ⟳ Atualizar para o live (Brapi).</div>
+  <div id="_newver" onclick="location.reload()"></div>
 </header>
 
 <div class="sticky">
@@ -239,7 +242,7 @@ function perLabel(p,t){
   return s.replace('-',' ');
 }
 
-function getBook(){return DATA.books.find(b=>b.key===activeBook)||DATA.books[0];}
+function getBook(){return liveBook(DATA.books.find(b=>b.key===activeBook)||DATA.books[0]);}
 function toggleAcc(id){document.getElementById(id).classList.toggle('closed');}
 function setBook(k){activeBook=k;apnlSel=null;renderAll();}
 function setPeriod(p){activePeriod=p;renderAll();}
@@ -263,6 +266,77 @@ function perIsAnual(p){return PER_ANUAL.has(PER_KEY(p));}
 const PNL_LABEL={'__CUSTOS__':'CUSTOS DO FUNDO','CAIXA':'CAIXA'};
 const pnlLabel=a=>PNL_LABEL[_tk(a)]?PNL_LABEL[_tk(a)]+(a.includes('-B')?a.slice(a.indexOf('-B')):''):a;
 
+
+// ─── Book "live": TUDO recalculado com os preços live ────────────────────
+// 05/10/2026 (Felipe): ao clicar ⟳ Atualizar, tudo atualiza — card, retornos por período,
+// P&L periódico, gráfico, P&L por ativo, alocação, posições. Regra: hoje é um ponto novo da
+// série, sem fluxo. Então: ret_live = (1+ret)·(1+dia) − 1 (TWR exato); P&L R$ += qtd·Δpreço;
+// contrib_live = contrib + (Δ/NAV_D1)·(1+ret) (mantém Σ contrib = TOTAL); CDI ganha um dia
+// (último fator diário da série); IBOV ganha o dia do ^BVSP (Brapi, fechamento D-1 do
+// histórico dele). XIRR a.a. é aproximado: (1+xirr)·(1+dia)^(365/dias da janela) − 1.
+// Os spreads (CDI+, IPCA+) andam junto com a variação do retorno. O payload (DATA) nunca é
+// alterado — liveBook devolve uma cópia ajustada, cacheada por versão dos preços.
+let liveVer=0,liveIbov=null;const _lbCache={};
+function _isoToday(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function _cdiDaily(){const c=(DATA.benchmarks||{}).CDI;if(!c||!c.values||c.values.length<2)return 0;const n=c.values.length;return c.values[n-1]/c.values[n-2]-1;}
+function _ibovDia(){return (liveIbov&&liveIbov.px&&liveIbov.close_d1)?liveIbov.px/liveIbov.close_d1-1:0;}
+function isLive(){return Object.keys(livePrices).length>0;}
+function _liveAtivo(){const b0=DATA.books[0];return isLive()&&b0&&b0.last&&b0.last.date&&_isoToday()>b0.last.date;}
+const _ch=(r,d)=>r==null?null:(1+r)*(1+d)-1;
+function liveBook(b){
+  if(!isLive()||!b.last||!b.last.date)return b;
+  const today=_isoToday();if(today<=b.last.date)return b;   // histórico já tem hoje: nada a ajustar
+  const ck=b.key+'|'+liveVer;if(_lbCache[ck])return _lbCache[ck];
+  const pos=b.positions||[];const precoOf={},clsOf={},dT={};let delta=0;
+  for(const p of pos){const t=_tk(p.ativo);if(p.preco!=null)precoOf[t]=p.preco;if(p.classe)clsOf[t]=p.classe;
+    if(livePrices[t]==null||!p.qty)continue;const d=p.qty*(livePrices[t]-(p.preco||0));dT[t]=(dT[t]||0)+d;delta+=d;}
+  const navD1=b.last.nav||0,dia=navD1?delta/navD1:0,cdiD=_cdiDaily();
+  const L=JSON.parse(JSON.stringify(b));L._live=true;L._navD1=navD1;L._delta=delta;L._dia=dia;
+  L.last.nav=navD1+delta;L.last.date=today;if(b.last.cota!=null)L.last.cota=b.last.cota*(1+dia);if(b.last.cota_abs!=null)L.last.cota_abs=b.last.cota_abs*(1+dia);
+  for(const k in L.returns)L.returns[k]=_ch(L.returns[k],dia);
+  for(const k in L.cdi_returns)L.cdi_returns[k]=_ch(L.cdi_returns[k],cdiD);
+  if(L.series&&L.series.dates&&L.series.dates.length){L.series.dates.push(today);L.series.values.push(L.series.values[L.series.values.length-1]*(1+dia));}
+  const daysOf=k=>{const bd=k==='Inception'?{start:b.data_inicio}:(b.pnl_period_bounds||{})[k];const s=bd&&bd.start;return s?Math.max(1,(new Date(today)-new Date(s))/864e5):365;};
+  const adjRows=(rows,k,R)=>{const days=daysOf(k);
+    for(const a of rows){if(a.ativo==='__TOTAL__')continue;const t=_tk(a.ativo);const px=livePrices[t],p0=precoOf[t];if(px==null||p0==null||!a.open_qty)continue;
+      const d=a.open_qty*(px-p0),di=p0?px/p0-1:0;
+      a.unrealized_pnl=(a.unrealized_pnl||0)+d;a.total_pnl=(a.total_pnl||0)+d;
+      if(a.contrib!=null)a.contrib+=(d/navD1)*(1+(R||0));
+      if(a.ret_period!=null){const n=_ch(a.ret_period,di),dv=n-a.ret_period;a.ret_period=n;if(a.cdi_plus_per!=null)a.cdi_plus_per+=dv;if(a.ipca_plus_per!=null)a.ipca_plus_per+=dv;}
+      if(a.xirr!=null){const n=(1+a.xirr)*Math.pow(1+di,365/days)-1,dv=n-a.xirr;a.xirr=n;if(a.cdi_plus!=null)a.cdi_plus+=dv;if(a.ipca_plus!=null)a.ipca_plus+=dv;}
+    }};
+  adjRows(L.pnl||[],'Inception',(b.returns||{}).Inception);
+  for(const k in (L.pnl_periods||{}))adjRows(L.pnl_periods[k],k,(b.returns||{})[k]);
+  const tot=(L.pnl||[]).find(a=>a.ativo==='__TOTAL__');
+  if(tot){const R=(b.returns||{}).Inception||0;if(tot.contrib!=null)tot.contrib+=(delta/navD1)*(1+R);
+    if(tot.xirr!=null){const n=(1+tot.xirr)*Math.pow(1+dia,365/daysOf('Inception'))-1,dv=n-tot.xirr;tot.xirr=n;if(tot.cdi_plus!=null)tot.cdi_plus+=dv-cdiD;if(tot.ipca_plus!=null)tot.ipca_plus+=dv;}}
+  for(const k in (L.pnl_period_totals||{})){const t=L.pnl_period_totals[k];if(!t)continue;const r0=t.ret;
+    if(t.ret_cum!=null)t.ret_cum=_ch(t.ret_cum,dia);
+    if(t.ret!=null)t.ret=t.annualized?(1+t.ret)*Math.pow(1+dia,365/daysOf(k))-1:_ch(t.ret,dia);
+    const dv=(t.ret!=null&&r0!=null)?t.ret-r0:0;if(t.cdi_plus!=null)t.cdi_plus+=dv-cdiD;if(t.ipca_plus!=null)t.ipca_plus+=dv;}
+  for(const k in (L.pnl_period_bounds||{}))if(L.pnl_period_bounds[k]&&L.pnl_period_bounds[k].end===b.last.date)L.pnl_period_bounds[k].end=today;
+  // P&L periódico: só os períodos que terminam na última data do histórico
+  const dCls={};for(const t in dT){const c=clsOf[t]||((DATA.asset_cls||{})[t]||[])[0]||'—';dCls[c]=(dCls[c]||0)+dT[t];}
+  for(const p of (L.annual_pnl||[])){if(p.end_date!==b.last.date)continue;const R=p.pnl_pct||0;
+    p.nav_end=(p.nav_end||0)+delta;p.pnl_total=(p.pnl_total||0)+delta;p.pnl_pct=_ch(p.pnl_pct,dia);p.end_date=today;
+    for(const c in (p.by_class||{})){const i=p.by_class[c];const dC=dCls[c]||0;if(!dC)continue;i.pnl=(i.pnl||0)+dC;if(i.contrib!=null)i.contrib+=(dC/navD1)*(1+R);
+      for(const kk in (i.vs||{})){if(i.vs[kk]&&i.vs[kk].length>=2){i.vs[kk][0]+=dC;i.vs[kk][1]+=(dC/navD1)*(1+R);}}
+      for(const a of (i.assets||[])){const d=dT[_tk(a.ativo)];if(!d)continue;a.pnl=(a.pnl||0)+d;if(a.contrib!=null)a.contrib+=(d/navD1)*(1+R);}}
+    for(const kk in (p.vs||{})){const v=p.vs[kk];if(!v)continue;if(kk==='CDI'&&v.bench_ret!=null){v.bench_ret=_ch(v.bench_ret,cdiD);v.custo_rs=(v.custo_rs||0)+navD1*cdiD;}
+      if(v.custo_rs!=null)v.pnl_exc=p.pnl_total-v.custo_rs;if(v.bench_ret!=null&&p.pnl_pct!=null)v.pct_exc=p.pnl_pct-v.bench_ret;}}
+  // alocação por classe a preço live
+  const al={};for(const p of pos){const t=_tk(p.ativo);const px=livePrices[t]!=null?livePrices[t]:p.preco;const v=(p.qty||0)*(px||0);if(!v)continue;const c=p.classe||'—';al[c]=(al[c]||0)+v;}
+  if(Object.keys(al).length)L.alloc=al;
+  _lbCache[ck]=L;return L;
+}
+function getBench(){
+  const raw=DATA.benchmarks||{};if(!_liveAtivo())return raw;
+  const ck='__bench|'+liveVer;if(_lbCache[ck])return _lbCache[ck];
+  const B=JSON.parse(JSON.stringify(raw));const today=_isoToday();const cdiD=_cdiDaily(),ibD=_ibovDia();
+  const bump=(bm,d)=>{if(!bm)return;if(bm.dates&&bm.dates.length&&bm.dates[bm.dates.length-1]<today){bm.dates.push(today);bm.values.push(bm.values[bm.values.length-1]*(1+d));}for(const k in (bm.returns||{}))bm.returns[k]=_ch(bm.returns[k],d);};
+  bump(B.CDI,cdiD);if(liveIbov)bump(B.IBOV,ibD);
+  _lbCache[ck]=B;return B;
+}
 // ─── Live (Brapi) ────────────────────────────────────────────────────────
 function computeLiveDelta(b){let d=0;for(const p of (b.positions||[])){const t=_tk(p.ativo);if(livePrices[t]!=null)d+=(p.qty||0)*(livePrices[t]-(p.preco||0));}return d;}
 // Variação do DIA: Σ qty × (live − fechamento do engine em DATA.last_data_date), sobre o NAV desse fechamento.
@@ -278,29 +352,80 @@ function computeDia(b){
     eleg++;const px=livePrices[t];if(px==null)continue;cob++;
     dR+=(p.qty||0)*(px-(p.preco||0));
   }
-  const navD1=(b.last.nav||0);return {dR,navD1,pct:navD1?dR/navD1:null,cob,eleg};
+  const navD1=b._navD1!=null?b._navD1:(b.last.nav||0);return {dR,navD1,pct:navD1?dR/navD1:null,cob,eleg};
+}
+// ─── Cache de preços live (localStorage) ─────────────────────────────────
+// 05/10/2026 (pedido do Felipe): cada preço que chega fica guardado com o horário;
+// a rodada seguinte busca primeiro quem NUNCA veio e depois do mais velho para o
+// mais novo. Quem falha fica com o último preço bom (marcado em âmbar com a hora).
+// Só ativo com posição (qty≠0) é buscado — instrumento inativo não entra na fila.
+const LIVE_CACHE_KEY='live_trip_px_v1', LIVE_FRESH_MS=5*60*1000;
+let liveTs={};   // ticker → epoch ms do preço que está em livePrices
+function _todayKey(){return new Date().toISOString().slice(0,10);}
+function loadLiveCache(){
+  try{const c=JSON.parse(localStorage.getItem(LIVE_CACHE_KEY)||'null');
+    if(c&&c.day===_todayKey()&&c.px){for(const t in c.px){livePrices[t]=c.px[t].px;liveTs[t]=c.px[t].ts;}if(c.ibov)liveIbov=c.ibov;liveVer++;return Object.keys(c.px).length;}
+  }catch(e){}return 0;}
+function saveLiveCache(){try{const px={};for(const t in livePrices)px[t]={px:livePrices[t],ts:liveTs[t]||Date.now()};localStorage.setItem(LIVE_CACHE_KEY,JSON.stringify({day:_todayKey(),px,ibov:liveIbov}));}catch(e){}}
+// IBOVESPA live: preço atual + fechamento na última data do histórico (historicalDataPrice da Brapi,
+// que é confiável; o regularMarketPreviousClose não é — ver computeDia).
+async function fetchIbov(){const b0=DATA.books[0];const d1=b0&&b0.last&&b0.last.date;if(!d1)return;
+  const ac=new AbortController();const tm=setTimeout(()=>ac.abort(),8000);
+  try{const r=await fetch(`https://brapi.dev/api/quote/%5EBVSP?range=5d&interval=1d&token=${BRAPI_TOKEN}`,{signal:ac.signal,cache:'no-store'});clearTimeout(tm);if(!r.ok)return;
+    const it=((await r.json()).results||[])[0];if(!it||it.regularMarketPrice==null)return;let close=null;
+    for(const h of (it.historicalDataPrice||[])){const d=new Date(h.date*1000).toISOString().slice(0,10);if(d===d1&&h.close!=null)close=h.close;}
+    if(close){liveIbov={px:it.regularMarketPrice,close_d1:close,ts:Date.now()};liveVer++;}
+  }catch(e){clearTimeout(tm);}}
+function _hm(ts){return ts?new Date(ts).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}):'—';}
+function liveTickers(){const s=new Set();for(const b of DATA.books)for(const p of (b.positions||[])){const t=_tk(p.ativo);if(t&&t!=='CAIXA'&&!t.startsWith('C/R')&&/^[A-Z0-9]{4}\d{1,2}$/.test(t)&&Math.abs(p.qty||0)>1e-6)s.add(t);}return [...s];}
+function liveStatus(extra){
+  const arr=liveTickers();const now=Date.now();let fresh=0,old=0,none=0,oldest=null,newest=0;
+  for(const t of arr){const ts=liveTs[t];if(livePrices[t]==null||!ts){none++;continue;}newest=Math.max(newest,ts);if(now-ts<=LIVE_FRESH_MS)fresh++;else{old++;if(oldest==null||ts<oldest)oldest=ts;}}
+  const tot=arr.length,cob=fresh+old;
+  let h=cob?`<span class="fresh">● Live ${_hm(newest)}</span> · ${cob}/${tot} ativos com preço`:'Preços de fechamento · toque ⟳ Atualizar para o live (Brapi).';
+  if(old)h+=` <span class="warn" title="preço guardado de rodada anterior">(${old} de rodada anterior, mais antigo ${_hm(oldest)})</span>`;
+  if(none&&cob)h+=` <span style="color:#B91C1C">(${none} sem cotação)</span>`;
+  if(extra)h+=' · '+extra;
+  document.getElementById('_status').innerHTML=h;
 }
 async function refreshLive(){
   const btn=document.getElementById('_refresh'),st=document.getElementById('_status');
   btn.disabled=true;btn.textContent='⟳ Buscando...';
-  const tickers=new Set();
-  for(const b of DATA.books)for(const p of (b.positions||[])){const t=_tk(p.ativo);if(t&&t!=='CAIXA'&&!t.startsWith('C/R')&&/^[A-Z0-9]{4}\d{1,2}$/.test(t)&&Math.abs(p.qty||0)>1e-6)tickers.add(t);}
-  const arr=[...tickers];let count=0;const falhas=[];
-  // Brapi gratuita (medido 05/10/2026): concurrencyLimit = 1 e 1 ativo por chamada.
-  // 8 em paralelo devolvia 429 RATE_LIMITED para quem chegava junto — por isso
-  // "14 falhou", "7 falhou" variando a cada clique. Agora é UMA chamada por vez,
-  // com até 3 tentativas (espera 400/800/1200 ms) quando a API responde 429.
+  // fila: sem preço primeiro, depois do mais antigo para o mais novo
+  const arr=liveTickers().sort((a,b)=>(liveTs[a]||0)-(liveTs[b]||0));
   const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-  const one=async t=>{for(let k=0;k<3;k++){try{const r=await fetch(`https://brapi.dev/api/quote/${t}?token=${BRAPI_TOKEN}`);
-      if(r.status===429){await sleep(400*(k+1));continue;}
-      if(!r.ok)return false;const d=await r.json();const it=(d.results||[])[0];
-      if(it&&it.regularMarketPrice!=null){livePrices[it.symbol]=it.regularMarketPrice;if(it.regularMarketPreviousClose!=null)livePrev[it.symbol]=it.regularMarketPreviousClose;return true;}
-      return false;}catch(e){await sleep(300);}}return false;};
-  try{for(let i=0;i<arr.length;i++){if(await one(arr[i]))count++;else falhas.push(arr[i]);st.textContent=`⟳ ${i+1}/${arr.length}...`;}
-    const ts=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
-    st.innerHTML=`<span class="fresh">● Live atualizado ${ts}</span> · ${count}/${arr.length} ativos`+(falhas.length?` <span style="color:#B91C1C" title="${falhas.join(', ')}">(${falhas.length} sem cotação: ${falhas.join(', ')})</span>`:'');renderAll();}
-  catch(e){st.textContent='Falha ao buscar live: '+e.message;}
+  // Brapi gratuita (medido 05/10/2026): concurrencyLimit=1, 1 ativo/chamada, e de vez em
+  // quando uma chamada fica pendurada >15 s. Por isso: UMA chamada por vez, timeout de 8 s
+  // (AbortController), e até 3 passadas — quem falhou na 1ª volta a ser tentado nas seguintes.
+  const one=async t=>{for(let k=0;k<2;k++){const ac=new AbortController();const tm=setTimeout(()=>ac.abort(),8000);
+      try{const r=await fetch(`https://brapi.dev/api/quote/${t}?token=${BRAPI_TOKEN}`,{signal:ac.signal,cache:'no-store'});
+        clearTimeout(tm);
+        if(r.status===429){await sleep(500*(k+1));continue;}
+        if(!r.ok)return false;const d=await r.json();const it=(d.results||[])[0];
+        if(it&&it.regularMarketPrice!=null){livePrices[t]=it.regularMarketPrice;liveTs[t]=Date.now();liveVer++;return true;}
+        return false;}
+      catch(e){clearTimeout(tm);await sleep(300);}}return false;};
+  try{let pend=arr.slice();
+    for(let pass=1;pass<=3&&pend.length;pass++){
+      const next=[];
+      for(let i=0;i<pend.length;i++){st.textContent=`⟳ passada ${pass}: ${i+1}/${pend.length} (${pend[i]})...`;
+        if(await one(pend[i]))saveLiveCache();else next.push(pend[i]);}
+      renderAll();pend=next;if(pend.length)await sleep(1500);
+    }
+    st.textContent='⟳ IBOVESPA...';await fetchIbov();saveLiveCache();renderAll();liveStatus(pend.length?`<span style="color:#B91C1C">falhou agora: ${pend.join(', ')}</span>`:'');
+  }catch(e){st.textContent='Falha ao buscar live: '+e.message;}
   finally{btn.disabled=false;btn.textContent='⟳ Atualizar';}
+}
+// ─── Versão nova publicada? ──────────────────────────────────────────────
+// O GitHub Pages (e o navegador) seguram o index.html por ~10 min: em 05/10/2026 o
+// Felipe deu F5 às 14:16 e ainda viu o build das 12:37. A cada 60 s a página busca a
+// si mesma sem cache e, se o generated_at mudou, mostra a faixa para recarregar.
+async function checkNewVersion(){
+  if(!/^https?:/.test(location.protocol))return;
+  try{const r=await fetch(location.pathname+'?_='+Date.now(),{cache:'no-store'});if(!r.ok)return;
+    const s=await r.text();const m=s.match(/"generated_at":\s*"([^"]+)"/);
+    if(m&&m[1]!==DATA.generated_at){const b=document.getElementById('_newver');b.style.display='';b.textContent=`Versão nova publicada (engine ${m[1]}) — toque aqui para recarregar`;}
+  }catch(e){}
 }
 
 // ─── Render ──────────────────────────────────────────────────────────────
@@ -311,7 +436,8 @@ function init(){
   document.getElementById('_book-tabs').innerHTML=DATA.books.map(b=>`<button class="btn${b.key===activeBook?' active':''}" onclick="setBook('${b.key}')">${b.label}</button>`).join('');
   document.getElementById('_period-tabs').innerHTML=PER.map(p=>`<button class="btn${p===activePeriod?' active':''}" onclick="setPeriod('${p}')">${p}</button>`).join('');
   document.getElementById('_apnl-type').innerHTML=APNL_TYPES.map(([k,l])=>`<button class="btn${k===apnlType?' active':''}" onclick="setApnlType('${k}')">${l}</button>`).join('');
-  renderAll();
+  const nCache=loadLiveCache();renderAll();if(nCache)liveStatus('guardado neste aparelho — toque ⟳ para atualizar');
+  checkNewVersion();setInterval(checkNewVersion,60000);
 }
 function renderAll(){
   document.querySelectorAll('#_book-tabs .btn').forEach(e=>e.classList.toggle('active',e.textContent===getBook().label));
@@ -327,7 +453,7 @@ function renderCard(){
   const retInc=(b.returns||{}).Inception,cdiInc=(b.cdi_returns||{}).Inception;
   const alpha=(retInc!=null&&cdiInc!=null)?retInc-cdiInc:null;
   const live=Object.keys(livePrices).length>0;
-  const nav=b.last.nav+(live?computeLiveDelta(b):0);
+  const nav=b.last.nav;   // liveBook já traz o NAV live
   let dia='',diaSub='clique ⟳ Atualizar',diaPct='—',dCls='';
   if(live){const d=computeDia(b);dia=fmtBRLs(d.dR);diaPct=fmtPct(d.pct,2);dCls=pctCls(d.dR);diaSub=`${d.cob}/${d.eleg} ativos com preço live · NAV fech. ${DATA.last_data_date} ${fmtBRL(d.navD1)}`;}
   else dia='—';
@@ -338,9 +464,9 @@ function renderCard(){
     <div class="ini-tag">início <span>${fmtD(b.data_inicio)}</span></div></div>
   <div class="metrics">
     <div class="metric"><div class="lbl">NAV${live?' (live)':''}</div><div class="val mono">${fmtBRL(nav)}</div></div>
-    <div class="metric"><div class="lbl">Cota</div><div class="val mono">${fmt(b.last.cota,6)}</div></div>
-    <div class="metric"><div class="lbl">Ret ${activePeriod}</div><div class="val mono ${pctCls(ret)}">${fmtPct(ret)}</div><div class="sub">CDI ${fmtPct(cdi)} · vs <span class="${pctCls(vs)}">${vs==null?'—':fmtPct(vs).replace('%','')+' p.p.'}</span></div></div>
-    <div class="metric"><div class="lbl">Alpha CDI (Início)</div><div class="val mono ${pctCls(alpha)}">${fmtPct(alpha)}</div></div>
+    <div class="metric"><div class="lbl">Cota${b._live?' (live)':''}</div><div class="val mono">${fmt(b.last.cota,6)}</div></div>
+    <div class="metric"><div class="lbl">Ret ${activePeriod}${b._live?' (live)':''}</div><div class="val mono ${pctCls(ret)}">${fmtPct(ret)}</div><div class="sub">CDI ${fmtPct(cdi)} · vs <span class="${pctCls(vs)}">${vs==null?'—':fmtPct(vs).replace('%','')+' p.p.'}</span></div></div>
+    <div class="metric"><div class="lbl">Alpha CDI (Início)${b._live?' · live':''}</div><div class="val mono ${pctCls(alpha)}">${fmtPct(alpha)}</div></div>
     <div class="metric"><div class="lbl">Hoje vs fech. ${DATA.last_data_date}</div><div class="val mono ${dCls}">${dia}</div><div class="sub">${diaSub}</div></div>
     <div class="metric"><div class="lbl">Dia %</div><div class="val mono ${dCls}">${diaPct}</div></div>
   </div>
@@ -373,7 +499,7 @@ function renderApnl(){
   const best=assets.filter(a=>a.pnl>0).slice(0,5),worst=assets.filter(a=>a.pnl<0).slice(-5).reverse();
   const li=a=>`<tr><td>${a.ativo}<span class="cls-badge" style="background:${hexAlpha(clsColor(a.classe),.18)};color:${clsColor(a.classe)}">${a.classe}</span></td><td class="mono ${pctCls(a.pnl)}">${fmtBRLs(a.pnl)}</td><td class="mono ${pctCls(a.contrib)}">${a.contrib!=null?fmtPct(a.contrib,2):'—'}</td></tr>`;
   det.innerHTML=`<div class="detail">
-    <h4>${perLabel(p.period,p.period_type)} · ${fmtD(p.base_date)} → ${fmtD(p.end_date)}</h4>
+    <h4>${perLabel(p.period,p.period_type)} · ${fmtD(p.base_date)} → ${fmtD(p.end_date)}${(b._live&&p.end_date===b.last.date)?' <span class="warn" style="font-weight:600">● live</span>':''}</h4>
     <div class="kv">
       <div>Rentab. <b class="${pctCls(p.pnl_total)}">${fmtBRLs(p.pnl_total)}</b> · <b class="${pctCls(p.pnl_pct)}">${fmtPct(p.pnl_pct,2)}</b></div>
       <div>${cdi?`CDI ${fmtPct(cdi.bench_ret,2)} · vs CDI <b class="${pctCls(cdi.pct_exc)}">${fmtPct(cdi.pct_exc,2).replace('%',' p.p.')}</b> (${fmtBRLs(cdi.pnl_exc)})`:''}</div>
@@ -396,7 +522,7 @@ function renderChart(){
   const lines=[];
   const [d0,v0]=_cut(s.dates,s.values,base[0]);lines.push({name:b.label,color:'#1D4ED8',dates:d0,vals:v0.map(x=>x/base[1]*100),w:2.2});
   const BMC={CDI:'#B45309',IBOV:'#059669'};
-  for(const bk of ['CDI','IBOV']){const bm=(DATA.benchmarks||{})[bk];if(!bm||!bm.dates)continue;const bb=_valAtOrBefore(bm.dates,bm.values,base[0]);if(!bb)continue;
+  for(const bk of ['CDI','IBOV']){const bm=(getBench()||{})[bk];if(!bm||!bm.dates)continue;const bb=_valAtOrBefore(bm.dates,bm.values,base[0]);if(!bb)continue;
     const [dd,vv]=_cut(bm.dates,bm.values,bb[0]);const last=d0[d0.length-1];const d2=[],v2=[];for(let j=0;j<dd.length;j++)if(dd[j]<=last){d2.push(dd[j]);v2.push(vv[j]/bb[1]*100);}
     lines.push({name:bk==='IBOV'?'IBOVESPA':bk,color:BMC[bk],dates:d2,vals:v2,w:1.4});}
   const W=720,H=230,L=38,R=8,T=10,B=22;
@@ -420,7 +546,7 @@ function _bestWorst(b,p){
   return {best,worst};
 }
 function renderRets(){
-  const b=getBook();const bm=DATA.benchmarks||{};
+  const b=getBook();const bm=getBench()||{};
   let h=`<tr><th style="text-align:left">Período</th><th>${b.label.split(' — ')[0]}</th><th>CDI</th><th>IBOV</th><th>vs CDI<br>(p.p.)</th><th>▲ melhor<br>contrib</th><th>▼ pior<br>contrib</th></tr>`;
   for(const p of PER){
     const k=PER_KEY(p);const r=(b.returns||{})[k];if(r==null)continue;
@@ -437,7 +563,7 @@ function renderPnl(){
   const b=getBook();const el=document.getElementById('_pnl'),nota=document.getElementById('_pnl-nota');
   document.getElementById('_pnl-mais').classList.toggle('active',pnlMais);
   let rows=pnlRowsFor(b,activePeriod).slice();const tot=pnlTotalsFor(b,activePeriod);const anual=perIsAnual(activePeriod);const bd=boundsFor(b,activePeriod);
-  nota.innerHTML=`Janela: <b>${activePeriod==='Início'?'desde o início ('+fmtD(b.data_inicio)+')':activePeriod+(bd?' · '+fmtD(bd.start)+' → '+fmtD(bd.end):'')}</b>${bd&&bd.truncado?' (truncada no início do book)':''} · ${anual?'retorno anualizado (a.a.)':'retorno acumulado da janela'} · Contrib = quanto do retorno da janela veio do ativo (encadeada; soma = TOTAL).`;
+  nota.innerHTML=`Janela: <b>${activePeriod==='Início'?'desde o início ('+fmtD(b.data_inicio)+')':activePeriod+(bd?' · '+fmtD(bd.start)+' → '+fmtD(bd.end):'')}</b>${bd&&bd.truncado?' (truncada no início do book)':''} · ${anual?'retorno anualizado (a.a.)':'retorno acumulado da janela'} · Contrib = quanto do retorno da janela veio do ativo (encadeada; soma = TOTAL).${b._live?' <span class="warn">● live: P&amp;L, retorno e contrib incluem o dia de hoje; XIRR a.a. ajustado pelo dia (aprox.).</span>':''}`;
   if(!rows.length){el.innerHTML='<tr><td class="muted">Sem dados nesta janela.</td></tr>';return;}
   const retOf=a=>anual?a.xirr:(a.ret_period!=null?a.ret_period:(a.xirr!=null?a.xirr:null));
   const cdiOf=a=>anual?a.cdi_plus:(a.cdi_plus_per!=null?a.cdi_plus_per:a.cdi_plus);
@@ -471,16 +597,16 @@ function renderAlloc(){
 function renderPos(){
   const b=getBook();const live=Object.keys(livePrices).length>0;
   const rows=(b.positions||[]).filter(p=>Math.abs(p.valor_brl||0)>=0.01).map(p=>{const t=_tk(p.ativo);const px=livePrices[t]!=null?livePrices[t]:p.preco;const prev=p.preco;  // fechamento do engine (ver computeDia) — nunca o previousClose da Brapi
-    return {...p,_px:px,_val:(p.qty||0)*px,_dia:(livePrices[t]!=null&&prev)?px/prev-1:null,_live:livePrices[t]!=null};});
+    return {...p,_px:px,_val:(p.qty||0)*px,_dia:(livePrices[t]!=null&&prev)?px/prev-1:null,_live:livePrices[t]!=null,_ts:liveTs[t]};});
   rows.sort((x,y)=>y._val-x._val);
-  const totVal=rows.reduce((s,p)=>s+p._val,0);const navRef=b.last.nav+(live?computeLiveDelta(b):0);
+  const totVal=rows.reduce((s,p)=>s+p._val,0);const navRef=b.last.nav;
   const diff=totVal-navRef,ok=Math.abs(diff)<=Math.max(1,Math.abs(navRef)*0.0005);
   const d=live?computeDia(b):null;
   let h=`<tr><th style="text-align:left">Ativo</th><th class="hide-sm">Qtd</th><th>Preço</th><th>Dia</th><th>Valor</th><th>% NAV</th><th class="hide-sm">% acum</th></tr>`;
   h+=`<tr class="tot"><td>TOTAL <span class="muted" style="font-weight:500">${rows.length} pos.${ok?" ✓":""}</span></td><td class="hide-sm"></td><td></td><td class="mono ${d?pctCls(d.pct):''}">${d&&d.pct!=null?fmtPct(d.pct,2):'—'}</td><td class="mono">${fmtBRL(totVal)}</td><td class="mono">${fmtPct(navRef?totVal/navRef:null)}</td><td class="hide-sm" style="font-weight:400;white-space:normal;font-size:11px">${ok?`<span class="muted">NAV ✓</span>`:`<span style="color:#B91C1C">NAV ⚠ ${fmtBRLs(diff)}</span>`}</td></tr>`;
   let cum=0;
   for(const p of rows){const pct=navRef?p._val/navRef:0;cum+=pct;const c=clsColor(p.classe);
-    h+=`<tr><td><i class="cls-dot" style="background:${c}"></i><span class="ticker">${p.ativo}</span>${p._live?' <span class="pos">●</span>':''}<span class="cls-badge" style="background:${hexAlpha(c,.18)};color:${c}">${p.classe}</span></td><td class="mono hide-sm">${fmtQty(p.qty)}</td><td class="mono">${fmtNum(p._px,2)}</td><td class="mono ${p._dia!=null?pctCls(p._dia):''}">${p._dia!=null?fmtPct(p._dia,2):'—'}</td><td class="mono">${fmtBRL(p._val)}</td><td class="mono ${pct<0?'neg':''}">${fmtPct(pct)}</td><td class="mono muted hide-sm">${fmtPct(cum)}</td></tr>`;}
+    h+=`<tr><td><i class="cls-dot" style="background:${c}"></i><span class="ticker">${p.ativo}</span>${p._live?` <span class="${(Date.now()-(p._ts||0))<=LIVE_FRESH_MS?'pos':'warn'}" title="live ${_hm(p._ts)}">●</span>`:''}<span class="cls-badge" style="background:${hexAlpha(c,.18)};color:${c}">${p.classe}</span></td><td class="mono hide-sm">${fmtQty(p.qty)}</td><td class="mono">${fmtNum(p._px,2)}</td><td class="mono ${p._dia!=null?pctCls(p._dia):''}">${p._dia!=null?fmtPct(p._dia,2):'—'}</td><td class="mono">${fmtBRL(p._val)}</td><td class="mono ${pct<0?'neg':''}">${fmtPct(pct)}</td><td class="mono muted hide-sm">${fmtPct(cum)}</td></tr>`;}
   document.getElementById('_pos').innerHTML=h;
 }
 
